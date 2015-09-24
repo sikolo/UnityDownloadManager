@@ -55,6 +55,18 @@ public class Download : MonoBehaviour
         _singleton.Enqueue(job);
     }
 
+	/// <summary>
+	///  Downloads a file Async and sends it to the callback.
+	///  caches image files to local disk
+	///  retries the failed download a set number of times
+	///  Invokes the failscript if the download failed
+	/// </summary>
+	public static void Async(string path, DownloadCallback callback, FailScript failscript, bool saveToLocal, int downloadRetries )
+	{
+		Job job = new Job(path, callback, saveToLocal, downloadRetries, failscript);
+		_singleton.Enqueue(job);
+	}
+
     /// <summary>
     ///  Downloads a file Async and sends it to the callback.
     ///  retries the failed download a set number of times
@@ -138,11 +150,11 @@ public class Download : MonoBehaviour
     {
         get
         {
-            if (_instance.Equals(null))
+            if (_instance == null)
             {
                 GameObject runCode = GameObject.Find("RunCode");
 
-                if (runCode.Equals(null))
+				if (runCode == null)
                 {
                     runCode = new GameObject("RunCode");
                 }
@@ -174,7 +186,7 @@ public class Download : MonoBehaviour
             return;
         }
 
-        _IsActive = true;
+        _IsActive = true; 
 
         if (!_jobIsProcessing
         && Internet.isConnected())
@@ -191,7 +203,7 @@ public class Download : MonoBehaviour
 
         Job job = _downloadQueue.Dequeue() as Job;
 
-        yield return null;
+        //yield return null;
 
         if (job != null)
         {
@@ -228,7 +240,7 @@ public class Download : MonoBehaviour
                     string fileName = Path.GetFileNameWithoutExtension(www.url.Replace("%20", " "));
                     string fileExtension = Path.GetExtension(www.url);
                     string filePath = downloadDirectory + fileName + fileExtension;
-                    Debug.Log(filePath);
+                    //Debug.Log(filePath);
 #if !UNITY_WEBPLAYER
                     File.WriteAllBytes(filePath.Replace("%20", " "), bytes);
 #endif
@@ -238,7 +250,7 @@ public class Download : MonoBehaviour
 #endif
                 }
 
-                _jobIsProcessing = false;
+                //_jobIsProcessing = false;
 
                 break;
             }
