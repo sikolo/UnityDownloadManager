@@ -246,7 +246,7 @@ public class Download : MonoBehaviour
 #endif
 
 #if UNITY_IPHONE
-					iPhone.SetNoBackupFlag(filePath); //Apple will reject the app if this is backed up
+					UnityEngine.iOS.Device.SetNoBackupFlag(filePath); //Apple will reject the app if this is backed up
 #endif
                 }
 
