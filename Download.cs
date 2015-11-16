@@ -8,7 +8,7 @@ using System.IO;
 using UnityEngine;
 
 public delegate void FailScript();
-public delegate void DownloadCallback(WWW www);
+public delegate void DownloadCallback(string requestUrl, Texture2D texture);
 
 public class Download : MonoBehaviour
 {
@@ -140,6 +140,22 @@ public class Download : MonoBehaviour
         }
     }
 
+	/////////////////////////////////////////////////
+	//////------------I/O Support--------------//////
+	/////////////////////////////////////////////////
+	public sealed class ImageToSave
+	{
+		public string fileName { get; set; }
+		public byte[] bytes { get; set; }
+
+		public ImageToSave(string fileName, byte[] bytes)
+		{
+			this.fileName = fileName;
+			this.bytes = bytes;
+		}
+	}
+
+
     /////////////////////////////////////////////////
     //////---------Instance Members------------//////
     /////////////////////////////////////////////////
@@ -170,13 +186,60 @@ public class Download : MonoBehaviour
     private static Queue<Job> _downloadQueue;
     private static string downloadDirectory;
 
+	private static System.Object lockThis;
+	private static List<ImageToSave> dataToSave;
+	private static FileStream fw = null;
+	private static int byteStart = 0;
+	private static readonly int byteLen = 2048;
+
     void Awake()
     {
         _IsActive = false;
         _jobIsProcessing = false;
         _downloadQueue = new Queue<Job>();
         downloadDirectory = Application.persistentDataPath + "/downloads/";
+
+		dataToSave = new List<ImageToSave>();
+		lockThis = new System.Object();
     }
+
+	void Update()
+	{
+		if(dataToSave.Count>0){
+			lock (lockThis) {
+				if(fw == null){
+					string fileName = dataToSave[0].fileName;
+					fw = new FileStream(fileName, FileMode.CreateNew);
+					byteStart = 0;			
+					
+					#if UNITY_IPHONE
+					UnityEngine.iOS.Device.SetNoBackupFlag(fileName); //Apple will reject the app if this is backed up
+					#endif
+				}
+				else{
+					byte[] bytes = dataToSave[0].bytes;
+					int byteEnd = byteLen;
+					bool ended = false;
+					
+					if(byteStart+byteEnd>bytes.Length){
+						byteEnd = bytes.Length - byteStart;
+						ended = true;
+					}
+					
+					fw.Write(bytes , byteStart, byteEnd);
+					
+					if(ended){
+						fw.Close();
+						dataToSave.RemoveAt(0);
+						fw = null;
+					}
+					else{
+						byteStart += byteLen;
+					}
+				}
+			}
+		}
+	}
 
     void FixedUpdate()
     {
@@ -203,54 +266,59 @@ public class Download : MonoBehaviour
 
         Job job = _downloadQueue.Dequeue() as Job;
 
-        //yield return null;
-
         if (job != null)
         {
             for (int i = 0; i <= job.downloadRetries; i++)
-            {
-                //initiate working variables
-                WWW www = new WWW(job.path);
-                yield return www;
+			{
 
-                if (www.error != null)
-                {
-                    Debug.LogError("Download Error: " + www.url + " : " + www.error);
-                    if (job.failscript != null)
-                    {
-                        job.failscript();
-                    }
-                    continue;
-                }
+				Texture2D tex = null;
+				byte[] fileData;
+				WWW www = new WWW(job.path);
+				string fileName = Path.GetFileNameWithoutExtension(www.url.Replace("%20", " "));
+				string fileExtension = Path.GetExtension(www.url);
+				string filePath = downloadDirectory + fileName + fileExtension;
 
-                if (job.callback != null)
-                {
-                    job.callback(www);
-                }
+				if (File.Exists(filePath)){
+					fileData = File.ReadAllBytes(filePath);
+					tex = new Texture2D(2, 2);
+					tex.LoadImage(fileData); //..this will auto-resize the texture dimensions.
+				}
+				else{
+					yield return www;
 
-                if (job.saveToLocal)
-                {
-                    Byte[] bytes = www.texture.EncodeToPNG();
+					if (www.error != null)
+					{
+						Debug.LogError("Download Error: " + www.url + " : " + www.error);
+						if (job.failscript != null)
+						{
+							job.failscript();
+						}
+						continue;
+					}
+					tex = www.texture;
 
-                    if (!Directory.Exists(downloadDirectory))
-                    {
-                        Directory.CreateDirectory(downloadDirectory);
-                    }
+					if (job.saveToLocal)
+					{
+						Byte[] bytes = www.texture.EncodeToPNG();
+						
+						if (!Directory.Exists(downloadDirectory))
+						{
+							Directory.CreateDirectory(downloadDirectory);
+						}
 
-                    string fileName = Path.GetFileNameWithoutExtension(www.url.Replace("%20", " "));
-                    string fileExtension = Path.GetExtension(www.url);
-                    string filePath = downloadDirectory + fileName + fileExtension;
-                    //Debug.Log(filePath);
-#if !UNITY_WEBPLAYER
-                    File.WriteAllBytes(filePath.Replace("%20", " "), bytes);
-#endif
 
-#if UNITY_IPHONE
-					UnityEngine.iOS.Device.SetNoBackupFlag(filePath); //Apple will reject the app if this is backed up
-#endif
-                }
+						lock (lockThis) {
+							//Debug.Log("ELIPSE - LOCK 1");
+							dataToSave.Add(new ImageToSave(filePath.Replace("%20", " "), bytes));
+						}
 
-                //_jobIsProcessing = false;
+					}
+				}
+
+				if (job.callback != null)
+				{
+					job.callback(www.url, tex);
+				}
 
                 break;
             }
