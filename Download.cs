@@ -6,9 +6,26 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
+using System.Threading;
+
 
 public delegate void FailScript();
-public delegate void DownloadCallback(string requestUrl, Texture2D texture);
+public delegate void DownloadCallback(WWW www);
+
+
+public class DownloadDoOnMainThread : MonoBehaviour {
+	
+	public readonly static Queue<Action> ExecuteOnMainThread = new Queue<Action>();
+	
+	public virtual void Update()
+	{
+		// dispatch stuff on main thread
+		while (ExecuteOnMainThread.Count > 0)
+		{
+			ExecuteOnMainThread.Dequeue().Invoke();
+		}
+	}
+}
 
 public class Download : MonoBehaviour
 {
@@ -121,6 +138,10 @@ public class Download : MonoBehaviour
         public bool saveToLocal { get; set; }
         public int downloadRetries { get; set; }
         public FailScript failscript;
+		public string filePath;
+		public WWW www;
+
+		private byte[] bytes;
 
         public Job(string path, DownloadCallback callback, bool saveToLocal, int downloadRetries, FailScript failscript)
         {
@@ -128,6 +149,8 @@ public class Download : MonoBehaviour
             this.callback = callback;
             this.saveToLocal = saveToLocal;
             this.failscript = failscript;
+			this.filePath = null;
+			this.www = null;
 
             if (downloadRetries != default(int))
             {
@@ -138,6 +161,44 @@ public class Download : MonoBehaviour
                 this.downloadRetries = 0;
             }
         }
+
+		public void Persist(){
+			if(this.saveToLocal && this.filePath!=null){
+				Thread thread = new Thread(SaveData);
+				bytes = www.bytes;
+				thread.Start();
+			}
+			else{
+				if (this.callback != null)
+				{
+					this.callback(www);
+				}
+			}
+		}
+
+		private void SaveData() {
+			if (!Directory.Exists(downloadDirectory))
+			{
+				Directory.CreateDirectory(downloadDirectory);
+			}
+
+			//iOS
+			if (Application.platform == RuntimePlatform.IPhonePlayer){
+				#if UNITY_IPHONE
+				UnityEngine.iOS.Device.SetNoBackupFlag(this.filePath); //Apple will reject the app if this is backed up
+				#endif
+			}
+
+			File.WriteAllBytes(this.filePath, this.bytes);
+			this.filePath = null;
+			if (this.callback != null)
+			{
+				DownloadDoOnMainThread.ExecuteOnMainThread.Enqueue(() => {  
+					this.callback(www);
+				});
+			}		
+		}
+
     }
 
 	/////////////////////////////////////////////////
@@ -161,24 +222,36 @@ public class Download : MonoBehaviour
     /////////////////////////////////////////////////
 
     #region Singleton
-    private static Download _instance;
-    private static Download _singleton
+	private static DownloadDoOnMainThread _instanceDownloadDoOnMainThread;
+	private static Download _instance;
+	private static Download _singleton
     {
         get
         {
             if (_instance == null)
             {
-                GameObject runCode = GameObject.Find("RunCode");
+				GameObject runCode = GameObject.Find("RunCode");
 
 				if (runCode == null)
                 {
                     runCode = new GameObject("RunCode");
                 }
 
-                _instance = runCode.AddComponent(typeof(Download)) as Download;
-            }
+				_instance = runCode.AddComponent(typeof(Download)) as Download;
+			}
 
-            return _instance;
+			if(_instanceDownloadDoOnMainThread == null){
+				GameObject downloadDoOnMainThread = GameObject.Find("DownloadDoOnMainThread");
+
+				if (downloadDoOnMainThread == null)
+				{
+					downloadDoOnMainThread = new GameObject("DownloadDoOnMainThread");
+				}
+
+				_instanceDownloadDoOnMainThread = downloadDoOnMainThread.AddComponent(typeof(DownloadDoOnMainThread)) as DownloadDoOnMainThread;
+			}
+								
+			return _instance;
         }
     }
     #endregion
@@ -186,61 +259,25 @@ public class Download : MonoBehaviour
     private static Queue<Job> _downloadQueue;
     private static string downloadDirectory;
 
-	private static System.Object lockThis;
-	private static List<ImageToSave> dataToSave;
-	private static FileStream fw = null;
-	private static int byteStart = 0;
-	private static readonly int byteLen = 2048;
-
     void Awake()
     {
         _IsActive = false;
         _jobIsProcessing = false;
         _downloadQueue = new Queue<Job>();
-        downloadDirectory = Application.persistentDataPath + "/downloads/";
 
-		dataToSave = new List<ImageToSave>();
-		lockThis = new System.Object();
-    }
-
-	void Update()
-	{
-		if(dataToSave.Count>0){
-			lock (lockThis) {
-				if(fw == null){
-					string fileName = dataToSave[0].fileName;
-					fw = new FileStream(fileName, FileMode.CreateNew);
-					byteStart = 0;			
-					
-					#if UNITY_IPHONE
-					UnityEngine.iOS.Device.SetNoBackupFlag(fileName); //Apple will reject the app if this is backed up
-					#endif
-				}
-				else{
-					byte[] bytes = dataToSave[0].bytes;
-					int byteEnd = byteLen;
-					bool ended = false;
-					
-					if(byteStart+byteEnd>bytes.Length){
-						byteEnd = bytes.Length - byteStart;
-						ended = true;
-					}
-					
-					fw.Write(bytes , byteStart, byteEnd);
-					
-					if(ended){
-						fw.Close();
-						dataToSave.RemoveAt(0);
-						fw = null;
-					}
-					else{
-						byteStart += byteLen;
-					}
-				}
-			}
+		if (Application.platform == RuntimePlatform.IPhonePlayer){
+			string path = Application.persistentDataPath.Substring( 0, Application.persistentDataPath.Length - 5 );
+			path = path.Substring( 0, path.LastIndexOf( '/' ) );
+			downloadDirectory =  Path.Combine( path, "Documents/downloads/" );
 		}
-	}
+		else{
+			downloadDirectory = Application.persistentDataPath + "/downloads/";
+		}
 
+		//Debug.Log("DOWNLOAD - downloadDirectory: "+downloadDirectory);
+
+    }
+	
     void FixedUpdate()
     {
         if (_downloadQueue.Count == 0)
@@ -268,64 +305,46 @@ public class Download : MonoBehaviour
 
         if (job != null)
         {
+			string fileName = Path.GetFileNameWithoutExtension(job.path.Replace("%20", " "));
+			string fileExtension = Path.GetExtension(job.path);
+			string filePath = downloadDirectory + fileName + fileExtension;
+			job.filePath = filePath.Replace("%20", " ");
+
+			WWW www = null;
+
             for (int i = 0; i <= job.downloadRetries; i++)
 			{
-
-				Texture2D tex = null;
-				byte[] fileData;
-				WWW www = new WWW(job.path);
-				string fileName = Path.GetFileNameWithoutExtension(www.url.Replace("%20", " "));
-				string fileExtension = Path.GetExtension(www.url);
-				string filePath = downloadDirectory + fileName + fileExtension;
-
-				if (File.Exists(filePath)){
-					fileData = File.ReadAllBytes(filePath);
-					tex = new Texture2D(2, 2);
-					tex.LoadImage(fileData); //..this will auto-resize the texture dimensions.
+				if (job.saveToLocal && File.Exists(filePath)){
+					www = new WWW("file://" + job.filePath);
 				}
 				else{
-					yield return www;
-
-					if (www.error != null)
-					{
-						Debug.LogError("Download Error: " + www.url + " : " + www.error);
-						if (job.failscript != null)
-						{
-							job.failscript();
-						}
-						continue;
-					}
-					tex = www.texture;
-
-					if (job.saveToLocal)
-					{
-						Byte[] bytes = www.texture.EncodeToPNG();
-						
-						if (!Directory.Exists(downloadDirectory))
-						{
-							Directory.CreateDirectory(downloadDirectory);
-						}
-
-
-						lock (lockThis) {
-							//Debug.Log("ELIPSE - LOCK 1");
-							dataToSave.Add(new ImageToSave(filePath.Replace("%20", " "), bytes));
-						}
-
-					}
+					www = new WWW(job.path);
 				}
-
-				if (job.callback != null)
+				yield return www;
+				if (www.error != null)
 				{
-					job.callback(www.url, tex);
+					www.Dispose();
+					www = null;
+					continue;
 				}
-
+				job.www = www;
                 break;
             }
-            _jobIsProcessing = false;
-        }
-    }
 
+			if(job.www != null){
+				job.Persist();
+			}
+			else{
+//				Debug.LogError("Download Error: " + www.url + " : " + www.error);
+				if (job.failscript != null){
+					job.failscript();
+				}
+			}
+
+        }
+		_jobIsProcessing = false;
+    }
+	
     private void Enqueue(Job job)
     {
         _downloadQueue.Enqueue(job);
